@@ -25,6 +25,7 @@ try:
     import cPickle as pickle
 except ImportError:
     import pickle
+from contextlib import closing
 import errno
 from functools import wraps
 import logging
@@ -48,6 +49,12 @@ except ImportError:
 
 import re
 import socket
+
+try:
+    string_types = basestring
+except NameError:
+    string_types = str
+
 try: # pragma: no cover
     # Python 2
     from urllib2 import urlopen
@@ -60,11 +67,13 @@ except ImportError: # pragma: no cover
 
 LOG = logging.getLogger("tldextract")
 
-CACHE_FILE_DEFAULT = os.path.join(os.path.dirname(__file__), '.tld_cache_file.pickle')
+CACHE_FILE_DEFAULT = os.path.join(os.path.dirname(__file__), '.tld_set')
 CACHE_FILE = os.path.expanduser(os.environ.get("TLDEXTRACT_CACHE", CACHE_FILE_DEFAULT))
 
-PUBLIC_SUFFIX_LIST_URL = \
-    'https://raw.github.com/mozilla/mozilla-central/master/netwerk/dns/effective_tld_names.dat'
+PUBLIC_SUFFIX_LIST_URLS = (
+    'http://mxr.mozilla.org/mozilla-central/source/netwerk/dns/effective_tld_names.dat?raw=1',
+    'https://raw.github.com/mozilla/gecko-dev/master/netwerk/dns/effective_tld_names.dat',
+)
 
 SCHEME_RE = re.compile(r'^([' + scheme_chars + ']+:)?//')
 IP_RE = re.compile(r'^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$')
@@ -131,7 +140,7 @@ class ExtractResult(tuple):
       return ''
 
 class TLDExtract(object):
-    def __init__(self, cache_file=CACHE_FILE, suffix_list_url=PUBLIC_SUFFIX_LIST_URL, fetch=True,
+    def __init__(self, cache_file=CACHE_FILE, suffix_list_url=PUBLIC_SUFFIX_LIST_URLS, fetch=True,
                  fallback_to_snapshot=True):
         """
         Constructs a callable for extracting subdomain, domain, and suffix
@@ -161,10 +170,19 @@ class TLDExtract(object):
             LOG.warning("The 'fetch' argument is deprecated. Instead of specifying fetch, "
                         "you should specify suffix_list_url. The equivalent of fetch=False would "
                         "be suffix_list_url=None.")
-        self.suffix_list_url = suffix_list_url if suffix_list_url and fetch else None
+        self.suffix_list_urls = ()
+        if suffix_list_url and fetch:
+            if isinstance(suffix_list_url, string_types):
+                self.suffix_list_urls = (suffix_list_url,)
+            else:
+                # TODO: kwarg suffix_list_url can actually be a sequence of URL
+                #       strings. Document this.
+                self.suffix_list_urls = suffix_list_url
+        self.suffix_list_urls = tuple(url.strip() for url in self.suffix_list_urls if url.strip())
+
         self.cache_file = os.path.expanduser(cache_file or '')
         self.fallback_to_snapshot = fallback_to_snapshot
-        if not (self.suffix_list_url or self.cache_file or self.fallback_to_snapshot):
+        if not (self.suffix_list_urls or self.cache_file or self.fallback_to_snapshot):
             raise ValueError("The arguments you have provided disable all ways for tldextract "
                              "to obtain data. Please provide a suffix list data, a cache_file, "
                              "or set `fallback_to_snapshot` to `True`.")
@@ -217,7 +235,7 @@ class TLDExtract(object):
 
         if self.cache_file:
             try:
-                with open(self.cache_file) as f:
+                with open(self.cache_file, 'rb') as f:
                     self._extractor = _PublicSuffixListTLDExtractor(pickle.load(f))
                     return self._extractor
             except IOError as ioe:
@@ -228,13 +246,13 @@ class TLDExtract(object):
                 LOG.error("error reading TLD cache file %s: %s", self.cache_file, ex)
 
         tlds = frozenset()
-        if self.suffix_list_url:
-            raw_suffix_list_data = fetch_file(self.suffix_list_url)
+        if self.suffix_list_urls:
+            raw_suffix_list_data = fetch_file(self.suffix_list_urls)
             tlds = get_tlds_from_raw_suffix_list_data(raw_suffix_list_data)
 
         if not tlds:
             if self.fallback_to_snapshot:
-                with pkg_resources.resource_stream(__name__, '.tld_set_snapshot') as snapshot_file:
+                with closing(pkg_resources.resource_stream(__name__, '.tld_set_snapshot')) as snapshot_file:
                     self._extractor = _PublicSuffixListTLDExtractor(pickle.load(snapshot_file))
                     return self._extractor
             else:
@@ -244,7 +262,7 @@ class TLDExtract(object):
         LOG.info("computed TLDs: [%s, ...]", ', '.join(list(tlds)[:10]))
         if LOG.isEnabledFor(logging.DEBUG):
             import difflib
-            with pkg_resources.resource_stream(__name__, '.tld_set_snapshot') as snapshot_file:
+            with closing(pkg_resources.resource_stream(__name__, '.tld_set_snapshot')) as snapshot_file:
                 snapshot = sorted(pickle.load(snapshot_file))
             new = sorted(tlds)
             for line in difflib.unified_diff(snapshot, new, fromfile=".tld_set_snapshot", tofile=self.cache_file):
@@ -278,16 +296,23 @@ def get_tlds_from_raw_suffix_list_data(suffix_list_source):
     tld_iter = (m.group('tld') for m in tld_finder.finditer(suffix_list_source))
     return frozenset(tld_iter)
 
-def fetch_file(url):
-    """ Fetch the file and decode it from UTF-8 encoding to Python unicode.
+def fetch_file(urls):
+    """ Decode the first successfully fetched URL, from UTF-8 encoding to
+    Python unicode.
     """
-    conn = urlopen(url)
-    try:
-        s = conn.read()
-    except Exception as e:
-        LOG.exception('Exception reading Public Suffix List url ' + url + '. Consider using a mirror or constructing your TLDExtract with `fetch=False`.')
-        s = ''
-    return _decode_utf8(s)
+    s = ''
+
+    for url in urls:
+        try:
+            conn = urlopen(url)
+            s = conn.read()
+        except Exception as e:
+            LOG.error('Exception reading Public Suffix List url ' + url + ' - ' + str(e) + '.')
+        else:
+            return _decode_utf8(s)
+
+    LOG.error('No Public Suffix List found. Consider using a mirror or constructing your TLDExtract with `fetch=False`.')
+    return u''
 
 def _decode_utf8(s):
     """ Decode from utf8 to Python unicode string.
@@ -327,9 +352,9 @@ def main():
     distribution = pkg_resources.get_distribution('tldextract')
 
     parser = argparse.ArgumentParser(
-        version='%(prog)s ' + distribution.version,
         description='Parse hostname from a url or fqdn')
 
+    parser.add_argument('--version', action='version', version='%(prog)s ' + distribution.version)
     parser.add_argument('input', metavar='fqdn|url',
                         type=unicode, nargs='*', help='fqdn or url')
 
