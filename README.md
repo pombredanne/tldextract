@@ -28,10 +28,14 @@ country code.
 `ExtractResult` is a namedtuple, so it's simple to access the parts you want.
 
     >>> ext = tldextract.extract('http://forums.bbc.co.uk')
-    >>> ext.domain
-    'bbc'
-    >>> '.'.join(ext[:2]) # rejoin subdomain and domain
+    >>> (ext.subdomain, ext.domain, ext.suffix)
+    ('forums', 'bbc', 'co.uk')
+    >>> # rejoin subdomain and domain
+    >>> '.'.join(ext[:2])
     'forums.bbc'
+    >>> # a common alias
+    >>> ext.registered_domain
+    'bbc.co.uk'
 
 This module started by implementing the chosen answer from [this StackOverflow question on
 getting the "domain name" from a URL](http://stackoverflow.com/questions/569137/how-to-get-domain-name-from-url/569219#569219).
@@ -120,6 +124,19 @@ If you want to use input data from your local filesystem, just use the `file://`
 
 Use an absolute path when specifying the `suffix_list_url` keyword argument. `os.path` is your
 friend.
+
+## FAQ
+
+### If I pass an invalid URL, I still get a result, no error. What gives?
+
+To keep `tldextract` light in LoC & overhead, and because there are plenty of
+URL validators out there, this library is very lenient with input. If valid
+URLs are important to you, validate them before calling `tldextract`.
+
+This lenient stance lowers the learning curve of using the library, at the cost
+of desensitizing users to the nuances of URLs. Who knows how much. But in the
+future, I would consider an overhaul. For example, users could opt into
+validation, either receiving exceptions or error metadata on results.
 
 # Public API
 

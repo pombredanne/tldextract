@@ -20,6 +20,7 @@ fake_suffix_list_url = "file://" + os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     'fixtures/fake_suffix_list_fixture.dat'
 )
+extra_suffixes = ['foo1', 'bar1', 'baz1']
 
 extract = tldextract.TLDExtract(cache_file=_temporary_file())
 extract_no_cache = tldextract.TLDExtract(cache_file=False)
@@ -37,12 +38,23 @@ extract_using_fake_suffix_list_no_cache = tldextract.TLDExtract(
     cache_file=None,
     suffix_list_url=fake_suffix_list_url
 )
+extract_using_extra_suffixes = tldextract.TLDExtract(
+    cache_file=None,
+    suffix_list_url=fake_suffix_list_url,
+    extra_suffixes=extra_suffixes
+)
 
 
-class IntegrationTest(unittest.TestCase):
+class TldextractTestCase(unittest.TestCase):
+
+    def setUp(self):
+        logging.getLogger().setLevel(logging.WARN)
+
+
+class IntegrationTest(TldextractTestCase):
 
     def test_log_snapshot_diff(self):
-        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
 
         extractor = tldextract.TLDExtract()
         try:
@@ -68,7 +80,9 @@ class IntegrationTest(unittest.TestCase):
         extractor = tldextract.TLDExtract(suffix_list_url='foo', fetch=False)
         assert not extractor.suffix_list_urls
 
-class ExtractTest(unittest.TestCase):
+
+class ExtractTest(TldextractTestCase):
+
     def assertExtract(self, expected_subdomain, expected_domain, expected_tld, url,
                       fns=(
                           extract,
@@ -94,7 +108,7 @@ class ExtractTest(unittest.TestCase):
 
     def test_nested_subdomain(self):
         self.assertExtract("media.forums", "theregister", "co.uk",
-            "http://media.forums.theregister.co.uk")
+                           "http://media.forums.theregister.co.uk")
 
     def test_odd_but_possible(self):
         self.assertExtract('www', 'www', 'com', 'http://www.www.com')
@@ -112,8 +126,16 @@ class ExtractTest(unittest.TestCase):
         self.assertExtract('', '216.22.0.192', '', 'http://216.22.0.192/')
         self.assertExtract('216.22', 'project', 'coop', 'http://216.22.project.coop/')
 
+    def test_looks_like_ip(self):
+        self.assertExtract('', u'1\xe9', '', u'1\xe9')
+
     def test_punycode(self):
-        self.assertExtract('', u'россия', u'рф', 'http://xn--h1alffa9f.xn--p1ai')
+        self.assertExtract('', 'xn--h1alffa9f', 'xn--p1ai', 'http://xn--h1alffa9f.xn--p1ai')
+        # Entries that might generate UnicodeError exception
+        # This subdomain generates UnicodeError 'IDNA does not round-trip'
+        self.assertExtract('xn--tub-1m9d15sfkkhsifsbqygyujjrw602gk4li5qqk98aca0w','google', 'com', 'xn--tub-1m9d15sfkkhsifsbqygyujjrw602gk4li5qqk98aca0w.google.com')
+        # This subdomain generates UnicodeError 'incomplete punicode string'
+        self.assertExtract('xn--tub-1m9d15sfkkhsifsbqygyujjrw60','google','com','xn--tub-1m9d15sfkkhsifsbqygyujjrw60.google.com')
 
     def test_empty(self):
         self.assertExtract('', '', '', 'http://')
@@ -147,14 +169,24 @@ class ExtractTest(unittest.TestCase):
 
     def test_tld_is_a_website_too(self):
         self.assertExtract('www', 'metp', 'net.cn', 'http://www.metp.net.cn')
-        #self.assertExtract('www', 'net', 'cn', 'http://www.net.cn') # This is unhandled by the
+        # self.assertExtract('www', 'net', 'cn', 'http://www.net.cn') # This is unhandled by the
         # PSL. Or is it?
 
     def test_dns_root_label(self):
         self.assertExtract('www', 'example', 'com', 'http://www.example.com./')
 
+    def test_private_domains(self):
+        self.assertExtract('waiterrant', 'blogspot', 'com', 'http://waiterrant.blogspot.com')
 
-class ExtractTestUsingCustomSuffixListFile(unittest.TestCase):
+    def test_invalid_puny_with_puny(self):
+        self.assertExtract('xn--zckzap6140b352by.blog', 'so-net', 'xn--wcvs22d.hk', 'http://xn--zckzap6140b352by.blog.so-net.xn--wcvs22d.hk')
+
+    def test_puny_with_non_puny(self):
+        self.assertExtract('xn--zckzap6140b352by.blog', 'so-net', u'教育.hk', u'http://xn--zckzap6140b352by.blog.so-net.教育.hk')
+
+
+class ExtractTestUsingCustomSuffixListFile(TldextractTestCase):
+
     def test_suffix_which_is_not_in_custom_list(self):
         for fn in (extract_using_fake_suffix_list, extract_using_fake_suffix_list_no_cache):
             result = fn("www.google.com")
@@ -167,12 +199,38 @@ class ExtractTestUsingCustomSuffixListFile(unittest.TestCase):
                 self.assertEquals(result.suffix, custom_suffix)
 
 
+class ExtractTestUsingExtraSuffixes(TldextractTestCase):
+
+    def test_suffix_which_is_not_in_extra_list(self):
+        result = extract_using_extra_suffixes("www.google.com")
+        self.assertEquals(result.suffix, "")
+
+    def test_extra_suffixes(self):
+        for custom_suffix in extra_suffixes:
+            netloc = "www.foo.bar.baz.quux" + "." + custom_suffix
+            result = extract_using_extra_suffixes(netloc)
+            self.assertEquals(result.suffix, custom_suffix)
+
+
+class ExtractTestAsDict(TldextractTestCase):
+
+    def test_result_as_dict(self):
+        result = extract("http://admin:password1@www.google.com:666/secret/admin/interface?param1=42")
+        expected_dict = {'subdomain' : 'www',
+                         'domain' : 'google',
+                         'suffix' : 'com'}
+        self.assertEquals(result._asdict(), expected_dict)
+
+
 def test_suite():
+    logging.basicConfig()
+
     return unittest.TestSuite([
         doctest.DocTestSuite(tldextract.tldextract),
         unittest.TestLoader().loadTestsFromTestCase(IntegrationTest),
         unittest.TestLoader().loadTestsFromTestCase(ExtractTest),
         unittest.TestLoader().loadTestsFromTestCase(ExtractTestUsingCustomSuffixListFile),
+        unittest.TestLoader().loadTestsFromTestCase(ExtractTestUsingExtraSuffixes),
     ])
 
 
@@ -183,4 +241,3 @@ def run_tests(stream=sys.stderr):
 
 if __name__ == "__main__":
     run_tests()
-
